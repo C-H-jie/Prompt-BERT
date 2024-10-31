@@ -1,5 +1,6 @@
 import random
-import logging
+# import logging
+from loguru import logger
 import math
 import os
 import sys
@@ -8,6 +9,8 @@ from typing import Optional, Union, List, Dict, Tuple
 import torch
 import collections
 import random
+
+from os.path import join
 
 from datasets import load_dataset
 
@@ -31,6 +34,11 @@ from transformers import (
     BertForPreTraining,
     RobertaModel
 )
+import time
+
+# 设置工作目录为当前文件路径
+os.chdir(os.path.dirname(__file__))
+
 from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy, PreTrainedTokenizerBase
 from transformers.trainer_utils import is_main_process
 from transformers.data.data_collator import DataCollatorForLanguageModeling
@@ -38,7 +46,7 @@ from transformers.file_utils import cached_property, torch_required, is_torch_av
 from prompt_bert.models import RobertaForCL, BertForCL
 from prompt_bert.trainers import CLTrainer
 
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
@@ -48,14 +56,23 @@ class ModelArguments:
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune, or train from scratch.
     """
 
+    middle_sentence: bool = field(
+        default=False,
+        metadata={
+            "help": "Use middle sentence for unsupervised datasets."
+        }
+    )
+    
+
     # Huggingface's original arguments
     model_name_or_path: Optional[str] = field(
-        default=None,
+        default="bert-base-uncased",
         metadata={
             "help": "The model checkpoint for weights initialization."
             "Don't set if you want to train a model from scratch."
         },
     )
+    
     model_type: Optional[str] = field(
         default=None,
         metadata={"help": "If training from scratch, pass a model type from the list: " + ", ".join(MODEL_TYPES)},
@@ -162,7 +179,7 @@ class ModelArguments:
         }
     )
     mask_embedding_sentence_different_template: str= field(
-        default='',
+        default='*cls*_This_sentence_:_\"*sent_0*\"_means*mask*.*sep+*',
         metadata={
         }
     )
@@ -325,6 +342,13 @@ class ModelArguments:
         }
     )
 
+    temp: float = field(
+        default=0.05,
+        metadata={
+            "help": "Temperature for softmax."
+        }
+    )
+
 @dataclass
 class DataTrainingArguments:
     """
@@ -348,12 +372,12 @@ class DataTrainingArguments:
         },
     )
     preprocessing_num_workers: Optional[int] = field(
-        default=None,
+        default=10,
         metadata={"help": "The number of processes to use for the preprocessing."},
     )
 
     train_file: Optional[str] = field(
-        default=None, 
+        default="data/wiki1m_for_simcse.txt", 
         metadata={"help": "The training data file (.txt or .csv)."}
     )
     max_seq_length: Optional[int] = field(
@@ -394,6 +418,22 @@ class OurTrainingArguments(TrainingArguments):
         metadata={"help": "Evaluate transfer task dev sets (in validation)."}
     )
 
+    per_device_train_batch_size: int = field(
+        default=256,
+        metadata={"help": "The batch size per GPU for training."}
+    )
+
+    learning_rate: float = field(
+        default=1e-5, metadata={"help": "The initial learning rate for Adam."}
+    )
+
+    num_train_epochs: float = field(default=1.0, metadata={"help": "Total number of training epochs to perform."})
+
+    output_dir: str = field(
+        default="output",
+        metadata={"help": "The output directory where the model predictions and checkpoints will be written."}
+    )
+
     # reset follow flag type Optional[bool] -> bool
     # to fix typing error for TrainingArguments Optional[bool] in transformers==4.2.1
     # https://github.com/huggingface/transformers/pull/10672
@@ -417,6 +457,34 @@ class OurTrainingArguments(TrainingArguments):
         default=False,
         metadata={"help": "Whether or not to load the best model found during training at the end of training."},
     )
+
+    evaluation_strategy: str = field(
+        default="steps",
+        metadata={"help": "The evaluation strategy to use."},
+    )
+
+    metric_for_best_model: str = field(
+        default="stsb_spearman",
+        metadata={"help": "The metric to use to compare two different models."},
+    )
+
+    eval_steps: int = field(
+        default=125, metadata={"help": "Run an evaluation every X steps."}
+    )
+
+    overwrite_output_dir: bool = field(
+        default=False,
+        metadata={"help": "Overwrite the content of the output directory."},
+    )
+
+
+    do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
+
+    fp16: bool = field(default=False, metadata={"help": "Whether to use 16-bit (mixed) precision training."})
+
+    seed: int = field(default=42, metadata={"help": "random seed for initialization"})
+
+    
 
     @cached_property
     @torch_required
@@ -471,6 +539,9 @@ def main():
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
+
+
+
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, OurTrainingArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
@@ -478,6 +549,28 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+
+    use_vscode = True
+    if (use_vscode):
+        training_args.fp16 = True
+        model_args.mask_embedding_sentence_delta = True
+        model_args.mask_embedding_sentence = True
+        model_args.mlp_only_train = True
+        model_args.mask_embedding_sentence_template = '*cls*_This_sentence_:_\'*sent_0*\'_means*mask*.*sep+*'
+        model_args.mask_embedding_sentence_different_template = '*cls*_This_sentence_:_\"*sent_0*\"_means*mask*.*sep+*'
+        training_args.do_train = True
+        training_args.load_best_model_at_end = True
+        training_args.num_train_epochs = 1
+        training_args.overwrite_output_dir = True
+
+
+
+
+
+    # outpur_dir: The output directory where the model predictions and checkpoints will be written.
+    training_args.output_dir = join(training_args.output_dir, model_args.model_name_or_path, 'base_bsz-{}-lr-{}'.format(training_args.per_device_train_batch_size, training_args.learning_rate))
+
 
     if (
         os.path.exists(training_args.output_dir)
@@ -490,19 +583,26 @@ def main():
             "Use --overwrite_output_dir to overcome."
         )
 
-    # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO if is_main_process(training_args.local_rank) else logging.WARN,
-    )
+    # # Setup logging
+    # logging.basicConfig(
+    #     format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
+    #     datefmt="%m/%d/%Y %H:%M:%S",
+    #     level=logging.INFO if is_main_process(training_args.local_rank) else logging.WARN,
+    # )
+
+    cur_time = time.strftime("%Y%m%d%H%M%S", time.localtime())
+    # logger.add(join(training_args.output_dir, 'train-{}.log'.format(cur_time)))
+
 
     # Log on each process the small summary:
+    # log每一个进程的小总结
     logger.warning(
         f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
         + f" distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
     )
     # Set the verbosity to info of the Transformers logger (on main process only):
+    #将详细程度设置为Transformers记录器的信息（仅在主进程上）：
+
     if is_main_process(training_args.local_rank):
         transformers.utils.logging.set_verbosity_info()
         transformers.utils.logging.enable_default_handler()
@@ -510,6 +610,7 @@ def main():
     logger.info("Training/evaluation parameters %s", training_args)
 
     # Set seed before initializing model.
+    #在初始化模型之前设置种子。
     set_seed(training_args.seed)
 
     # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
@@ -521,13 +622,24 @@ def main():
     #
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
+
+    #获取数据集：您可以提供自己的 CSV/JSON/TXT 训练和评估文件（见下文）
+    # 或者只提供集线器上可用的公共数据集的名称https://huggingface.co/datasets/
+    #（数据集将自动从数据集中心下载
+    #对于 CSV/JSON 文件，此脚本将使用名为 “text” 的列或第一列。你可以很容易地调整这个
+    # 行为（见下文）
+    #在分布式训练中，load_dataset 函数保证只有一个本地进程可以并发
+    # 下载数据集。
+
+
     data_files = {}
     if data_args.train_file is not None:
         data_files["train"] = data_args.train_file
     extension = data_args.train_file.split(".")[-1]
     if extension == "txt":
-        extension = "text"
+        extension = "datatools/text.py"
     if extension == "csv":
+        extension = "datatools/csv.py.py"
         datasets = load_dataset(extension, data_files=data_files, cache_dir="./data/", delimiter="\t" if "tsv" in data_args.train_file else ",")
     else:
         datasets = load_dataset(extension, data_files=data_files, cache_dir="./data/")
@@ -540,6 +652,16 @@ def main():
     # Distributed training:
     # The .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
+
+
+    #在以下位置查看有关加载任何类型的标准或自定义数据集（来自文件、python dic、熊猫DataFrame等）的更多信息
+    #https://huggingface.co/docs/datasets/loading_datasets.html。
+
+    #加载预训练模型和标记器
+    #
+    #分布式训练：
+    #from_pretrained方法保证只有一个本地进程可以并发
+    #下载模型和词汇。
     config_kwargs = {
         "cache_dir": model_args.cache_dir,
         "revision": model_args.model_revision,
@@ -607,10 +729,23 @@ def main():
         sent0_cname = column_names[0]
         sent1_cname = column_names[1]
         sent2_cname = column_names[2]
+
+    elif len(column_names)==1 and model_args.middle_sentence:
+        
+        # Unsupervised datasets with middle sentence
+        sent0_cname = column_names[0]
+        sent1_cname = column_names[0]
+        sent2_cname = column_names[0]
+
     elif len(column_names) == 1:
         # Unsupervised datasets
         sent0_cname = column_names[0]
         sent1_cname = column_names[0]
+        # sent2_cname = column_names[0]
+
+        
+
+
     else:
         raise NotImplementedError
 
@@ -773,7 +908,7 @@ def main():
     data_collator = default_data_collator if data_args.pad_to_max_length else OurDataCollatorWithPadding(tokenizer)
 
     # setup for wandb
-    #training_args.logging_steps=20
+    training_args.logging_steps=20
     #training_args.evaluation_strategy="non"
     if model_args.mask_embedding_sentence:
         model.mask_token_id = tokenizer.mask_token_id

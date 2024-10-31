@@ -18,9 +18,15 @@ logging.basicConfig(format='%(asctime)s : %(message)s', level=logging.DEBUG)
 PATH_TO_SENTEVAL = './SentEval'
 PATH_TO_DATA = './SentEval/data'
 
+
+os.chdir(os.path.dirname(__file__))
+
 # Import SentEval
 sys.path.insert(0, PATH_TO_SENTEVAL)
 import senteval
+
+
+# 设置工作目录为当前文件路径
 
 def cal_avg_cosine(k, n=100000):
     cos = torch.nn.CosineSimilarity(dim=-1)
@@ -74,20 +80,29 @@ def main():
     parser.add_argument("--embedding_only", action='store_true')
     parser.add_argument('--mlm_head_predict', action='store_true')
     parser.add_argument('--remove_continue_word', action='store_true')
-    parser.add_argument('--mask_embedding_sentence', action='store_true')
+
+    parser.add_argument('--mask_embedding_sentence', action='store_true',
+                        default=True)
+    
     parser.add_argument('--mask_embedding_sentence_use_org_pooler', action='store_true')
-    parser.add_argument('--mask_embedding_sentence_template', type=str, default=None)
+
+    parser.add_argument('--mask_embedding_sentence_template', type=str,
+                         default="*cls*_This_sentence_:_'_*sent_0*_'_means*mask*.*sep+*")
+    
     parser.add_argument('--mask_embedding_sentence_delta', action='store_true')
     parser.add_argument('--mask_embedding_sentence_use_pooler', action='store_true')
     parser.add_argument('--mask_embedding_sentence_autoprompt', action='store_true')
     parser.add_argument('--mask_embedding_sentence_org_mlp', action='store_true')
     parser.add_argument("--tokenizer_name", type=str, default='')
     parser.add_argument("--model_name_or_path", type=str,
+            default="output/bert-base-uncased/base_RCL_bsz-256-lr-1e-05",
             help="Transformers' model name or path")
+    
     parser.add_argument("--pooler", type=str,
             choices=['cls', 'cls_before_pooler', 'avg',  'avg_first_last'],
-            default='cls', 
+            default='avg', 
             help="Which pooler to use")
+    
     parser.add_argument("--mode", type=str, 
             choices=['dev', 'test', 'fasttest'],
             default='test', 

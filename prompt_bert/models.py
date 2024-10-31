@@ -50,6 +50,40 @@ class Similarity(nn.Module):
 
 
 
+def RCL_loss_fn(sim, targets):
+    
+    # loss_1 = nn.CrossEntropyLoss()
+
+    # loss_1 = loss_1(sim, targets)
+
+    # 获取对角线元素
+    # diagonal = sim.diagonal()
+
+    # 将对角线元素扩展为与原张量形状匹配的对角矩阵
+    diagonal_matrix = torch.diag(sim)
+
+    # 进行减法操作
+    result = sim - diagonal_matrix
+
+    lpair_components = result
+
+    lpair_components = torch.where(lpair_components <= 0, torch.tensor(-1e+12), lpair_components)
+
+    lpair_components = torch.cat((torch.zeros(1).to(lpair_components.device), lpair_components.view(-1)), dim=0)
+
+
+    loss = torch.logsumexp(lpair_components,dim=-1)
+
+    # loss = torch.logsumexp(lpair_components,dim=-1) / sim.size(0)
+
+
+    loss =loss + torch.nn.functional.cross_entropy(sim, targets)
+
+
+
+    return loss
+
+
 def cl_init(cls, config):
     """
     Contrastive learning class init function.
@@ -153,6 +187,7 @@ def cl_forward(cls,
         return_dict=True,
     )
 
+    # return outputs
 
     # Pooling
     if cls.model_args.mask_embedding_sentence:
@@ -244,6 +279,9 @@ def cl_forward(cls,
     #cos_sim.topk(k=2, dim=-1)
 
     loss_fct = nn.CrossEntropyLoss()
+
+    # loss_fct = RCL_loss_fn
+
     labels = torch.arange(cos_sim.size(0)).long().to(input_ids.device)
 
     # Calculate loss with hard negatives
@@ -387,18 +425,31 @@ def sentemb_forward(
 class BertForCL(BertPreTrainedModel):
     _keys_to_ignore_on_load_missing = [r"position_ids"]
 
-    def __init__(self, config, *model_args, **model_kargs):
+    def __init__(self, config,dropout=0.2,*model_args, **model_kargs):
         super().__init__(config)
+
+        # config.attention_probs_dropout_prob = dropout  # 修改config的dropout系数
+        # config.hidden_dropout_prob = dropout
         self.model_args = model_kargs["model_args"]
         self.bert = BertModel(config)
 
         if self.model_args.mask_embedding_sentence_autoprompt:
             # register p_mbv in init, avoid not saving weight
-            self.p_mbv = torch.nn.Parameter(torch.zeros(10))
+            self.p_mbv = torch.nn.Parameter(torch.zeros(10)) 
             for param in self.bert.parameters():
                 param.requires_grad = False
 
         cl_init(self, config)
+
+    def set_dropout_prob(self, new_prob):  
+        """  
+        设置 embeddings 和encoder的  dropout 概率为新的值。  
+        """  
+        for layer in self.bert.encoder.layer:  
+            layer.attention.self.dropout.p = new_prob  
+            layer.attention.output.dropout.p = new_prob
+            layer.output.dropout.p = new_prob  
+        self.bert.embeddings.dropout.p = new_prob
 
 
     def forward(self,
